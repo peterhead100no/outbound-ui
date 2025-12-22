@@ -17,7 +17,7 @@ COPY requirements.txt .
 RUN pip install --upgrade pip && pip install -r requirements.txt
 
 # Copy app
-COPY app.py .
+COPY app2.py .
 
 # Streamlit default port
 EXPOSE 8501
