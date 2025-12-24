@@ -5,6 +5,8 @@ import time
 import json
 from datetime import datetime
 from pathlib import Path
+from database import get_exotel_data
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Configure page
 st.set_page_config(
@@ -101,6 +103,51 @@ def get_status_color(status):
 st.title("☎️ Outbound Call Dialer")
 st.markdown("---")
 
+# Create tabs for different sections
+tab1, tab2 = st.tabs(["📞 Dialer", "📊 Exotel Data"])
+
+with tab2:
+    st.subheader("📊 Exotel Call Data")
+    
+    if st.button("🔄 Refresh Data", key="refresh_exotel"):
+        st.session_state.exotel_data = None
+    
+    if 'exotel_data' not in st.session_state:
+        st.session_state.exotel_data = None
+    
+    if st.session_state.exotel_data is None:
+        with st.spinner("Loading data from database..."):
+            exotel_df = get_exotel_data()
+            if exotel_df is not None:
+                st.session_state.exotel_data = exotel_df
+            else:
+                st.error("❌ Failed to load data from database. Please check the database connection.")
+    
+    if st.session_state.exotel_data is not None:
+        exotel_df = st.session_state.exotel_data
+        st.success(f"✅ Loaded {len(exotel_df)} records from exotel_data table")
+        
+        # Display statistics
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Total Records", len(exotel_df))
+        with col2:
+            st.metric("Columns", len(exotel_df.columns))
+        
+        st.markdown("---")
+        
+        # Display the dataframe
+        st.dataframe(exotel_df, use_container_width=True, hide_index=True)
+        
+        # Download option
+        csv = exotel_df.to_csv(index=False)
+        st.download_button(
+            label="📥 Download as CSV",
+            data=csv,
+            file_name="exotel_data.csv",
+            mime="text/csv"
+        )
+
 # Sidebar for file upload
 with st.sidebar:
     st.header("📁 Upload & Configuration")
@@ -112,8 +159,9 @@ with st.sidebar:
             st.session_state.df = df
             st.success(f"✅ File loaded successfully! ({len(df)} records)")
 
-# Main content area
-col1, col2 = st.columns(2)
+# Main content area for Tab 1
+with tab1:
+    col1, col2 = st.columns(2)
 
 with col1:
     st.subheader("📋 Call Mode Selection")
@@ -128,6 +176,14 @@ with col2:
             max_value=300,
             value=5,
             step=1
+        )
+        batch_size = st.number_input(
+            "Parallel calls (batch size):",
+            min_value=1,
+            max_value=10,
+            value=1,
+            step=1,
+            help="Number of calls to dial in parallel. Set to 3 to dial 3 calls at the same time."
         )
 
 st.markdown("---")
@@ -218,7 +274,7 @@ if st.session_state.df is not None:
         
         # Display status during automatic dialing
         if st.session_state.is_automatic_running:
-            st.info(f"⏳ Automatic dialing is running (Interval: {interval_seconds}s)")
+            st.info(f"⏳ Automatic dialing is running (Interval: {interval_seconds}s, Batch Size: {batch_size})")
             
             # Display progress
             progress_bar = st.progress(0)
@@ -230,42 +286,63 @@ if st.session_state.df is not None:
             ]
             
             if pending_indices:
-                for idx in pending_indices:
+                # Process in batches with parallel execution
+                for batch_start in range(0, len(pending_indices), batch_size):
                     if not st.session_state.is_automatic_running:
                         break
                     
-                    row = df.loc[idx]
+                    batch_indices = pending_indices[batch_start:batch_start + batch_size]
                     
-                    # Show which number is being dialed
-                    status_container.info(f"📞 Dialing: {row['name']} ({row['phone no']})")
+                    # Create a dictionary to store futures
+                    futures_to_idx = {}
                     
-                    # Make the call
-                    success, message = dial_number(str(row['phone no']))
+                    # Submit all calls in the batch to the thread pool
+                    with ThreadPoolExecutor(max_workers=batch_size) as executor:
+                        for idx in batch_indices:
+                            row = df.loc[idx]
+                            future = executor.submit(dial_number, str(row['phone no']))
+                            futures_to_idx[future] = idx
+                        
+                        # Process completed calls as they finish
+                        for future in as_completed(futures_to_idx):
+                            idx = futures_to_idx[future]
+                            row = df.loc[idx]
+                            
+                            try:
+                                success, message = future.result()
+                                
+                                if success:
+                                    st.session_state.call_status[idx] = {
+                                        'status': 'Dialed',
+                                        'timestamp': datetime.now().strftime("%H:%M:%S"),
+                                        'error': None
+                                    }
+                                    status_container.success(f"✅ Call initiated: {row['name']}")
+                                else:
+                                    st.session_state.call_status[idx] = {
+                                        'status': 'Failed',
+                                        'timestamp': datetime.now().strftime("%H:%M:%S"),
+                                        'error': message
+                                    }
+                                    status_container.error(f"❌ Failed: {row['name']} - {message}")
+                            except Exception as e:
+                                st.session_state.call_status[idx] = {
+                                    'status': 'Failed',
+                                    'timestamp': datetime.now().strftime("%H:%M:%S"),
+                                    'error': str(e)
+                                }
+                                status_container.error(f"❌ Error: {row['name']} - {str(e)}")
+                            
+                            # Update progress
+                            dialed_count = sum(
+                                1 for v in st.session_state.call_status.values()
+                                if v['status'] in ['Dialed', 'Failed']
+                            )
+                            progress_bar.progress(dialed_count / len(df))
                     
-                    if success:
-                        st.session_state.call_status[idx] = {
-                            'status': 'Dialed',
-                            'timestamp': datetime.now().strftime("%H:%M:%S"),
-                            'error': None
-                        }
-                        status_container.success(f"✅ Call initiated: {row['name']}")
-                    else:
-                        st.session_state.call_status[idx] = {
-                            'status': 'Failed',
-                            'timestamp': datetime.now().strftime("%H:%M:%S"),
-                            'error': message
-                        }
-                        status_container.error(f"❌ Failed: {row['name']} - {message}")
-                    
-                    # Update progress
-                    dialed_count = sum(
-                        1 for v in st.session_state.call_status.values()
-                        if v['status'] in ['Dialed', 'Failed']
-                    )
-                    progress_bar.progress(dialed_count / len(df))
-                    
-                    # Wait before next call
-                    time.sleep(interval_seconds)
+                    # Wait before next batch (except for the last batch)
+                    if batch_start + batch_size < len(pending_indices):
+                        time.sleep(interval_seconds)
                 
                 st.success("✅ Automatic dialing completed!")
                 st.session_state.is_automatic_running = False
