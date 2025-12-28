@@ -16,8 +16,8 @@ RUN apt-get update && apt-get install -y \
 COPY requirements.txt .
 RUN pip install --upgrade pip && pip install -r requirements.txt
 
-# Copy app
-COPY app2.py .
+# Copy app files
+COPY app2.py database.py .
 
 # Streamlit default port
 EXPOSE 8501
