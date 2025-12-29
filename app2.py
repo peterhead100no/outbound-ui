@@ -40,7 +40,7 @@ if 'last_status_check' not in st.session_state:
     st.session_state.last_status_check = {}
 
 # API Configuration
-API_ENDPOINT = "http://subepiglottic-nonviscously-maureen.ngrok-free.dev/start"
+API_ENDPOINT = "http://54.169.210.53:7862/start"
 HEADERS = {"Content-Type": "application/json"}
 
 # Exotel API Configuration (from environment variables)
