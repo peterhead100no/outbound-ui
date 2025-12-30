@@ -34,7 +34,7 @@ def get_exotel_data():
             return None
         
         query = """SELECT 
-        \"call_sid\",
+        \"sid\",
         \"To\", 
         \"From\",
         \"transcript\" , 
